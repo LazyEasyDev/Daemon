@@ -97,16 +97,16 @@ else
 	log "KVM is unavailable or disabled; using QEMU software emulation"
 fi
 
-for command in go openssl qemu-img virsh virt-install ssh scp ssh-keygen wget sha256sum; do
+for command in go openssl qemu-img virsh virt-install uuidgen ssh scp ssh-keygen wget sha256sum; do
 	require_command "$command"
 done
 
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
+builder_uuid=$(new_domain_uuid "$domain_name-builder")
+
 mkdir -p "$cache_dir" "$artifact_dir" "$work_dir"
 chmod 0755 "$cache_dir" "$work_dir"
-
-virsh_command() {
-	virsh --connect "$libvirt_uri" "$@"
-}
 
 if ! virsh_command net-info "$vm_network" >/dev/null 2>&1; then
 	fail "libvirt network '$vm_network' does not exist"
@@ -182,7 +182,7 @@ wait_for_new_boot() {
 	local next_progress=$SECONDS
 	local candidates candidate current_boot_id
 	while (( SECONDS < deadline )); do
-		candidates=$(lease_addresses "$domain_name")
+		candidates=$(lease_addresses "$domain_uuid")
 		while IFS= read -r candidate; do
 			[[ -n "$candidate" ]] || continue
 			ip_address=$candidate
@@ -229,15 +229,14 @@ cleanup() {
 	local status=$?
 	trap - EXIT
 	copy_guest_artifacts
-	for name in "$domain_name" "$builder_domain"; do
-		[[ -n "$name" ]] || continue
-		virsh_command dumpxml "$name" >"$artifact_dir/$name.xml" 2>/dev/null || true
-		if [[ "$name" == "$domain_name" && "$keep_vm" == 1 ]]; then
+	for uuid in "$domain_uuid" "$builder_uuid"; do
+		[[ -n "$uuid" ]] || continue
+		virsh_command dumpxml "$uuid" >"$artifact_dir/$uuid.xml" 2>/dev/null || true
+		if [[ "$uuid" == "$domain_uuid" && "$keep_vm" == 1 ]]; then
 			log "keeping VM $domain_name and work directory $work_dir"
 			continue
 		fi
-		virsh_command destroy "$name" >/dev/null 2>&1 || true
-		virsh_command undefine "$name" --nvram >/dev/null 2>&1 || virsh_command undefine "$name" >/dev/null 2>&1 || true
+		remove_owned_domain "$uuid"
 	done
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
 	if [[ "$keep_vm" != 1 ]]; then
@@ -362,6 +361,7 @@ EOF
 	if ! virt-install \
 		--connect "$libvirt_uri" \
 		--name "$builder_domain" \
+		--uuid "$builder_uuid" \
 		--memory "$vm_memory_mib" \
 		--vcpus "$vm_vcpus" \
 		--virt-type "$virt_type" \
@@ -383,10 +383,11 @@ EOF
 		fail "virt-install failed while building the native Devuan base"
 	fi
 	log "installer finished; finalizing cached base image"
-	virsh_command shutdown "$builder_domain" >/dev/null 2>&1 || true
-	wait_for_domain_off "$builder_domain"
-	virsh_command undefine "$builder_domain" --nvram >/dev/null 2>&1 || virsh_command undefine "$builder_domain" >/dev/null 2>&1
+	virsh_command shutdown "$builder_uuid" >/dev/null 2>&1 || true
+	wait_for_domain_off "$builder_uuid"
+	virsh_command undefine "$builder_uuid" --nvram >/dev/null 2>&1 || virsh_command undefine "$builder_uuid" >/dev/null 2>&1
 	builder_domain=
+	builder_uuid=
 	qemu-img check "$builder_image" >"$artifact_dir/base-image-check.txt"
 	mv "$builder_image" "$base_image"
 	chmod 0644 "$base_image"
@@ -427,6 +428,7 @@ remote_ready=0
 virt_install_args=(
 	--connect "$libvirt_uri"
 	--name "$domain_name"
+	--uuid "$domain_uuid"
 	--memory "$vm_memory_mib"
 	--vcpus "$vm_vcpus"
 	--virt-type "$virt_type"
@@ -445,7 +447,7 @@ virt_install_args=(
 
 log "creating native Devuan System V domain $domain_name"
 virt-install "${virt_install_args[@]}"
-wait_for_ssh "$domain_name" "$vm_boot_timeout" "Devuan System V guest"
+wait_for_ssh "$domain_uuid" "$vm_boot_timeout" "Devuan System V guest"
 
 ssh_guest "umask 077; mkdir -p ~/.ssh; printf '%s\\n' '$run_public_key' > ~/.ssh/authorized_keys"
 set_ssh_identity "$run_key"

@@ -125,6 +125,11 @@ Service names must:
 - contain only ASCII letters and digits;
 - be no longer than 241 characters.
 
+New systemd installations are limited to **240 characters**. A longer managed
+name produces a 255-byte unit name that the native journald stream protocol
+cannot handle reliably. This install-only restriction does not prevent
+management or removal of an existing service with a longer name.
+
 ## Install options
 
 ### Warning confirmation

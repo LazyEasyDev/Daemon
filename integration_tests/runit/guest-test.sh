@@ -17,6 +17,11 @@ artifact_dir="$state_dir/artifacts"
 fixture_path="$install_dir/relative-path-test.txt"
 interpreted_test="$install_dir/interpreted-app-test.sh"
 current_scenario=initialization
+respawn_name="${service_name}downrespawn"
+respawn_dir="/etc/sv/lz_lz_${respawn_name}"
+respawn_enabled="/var/service/lz_lz_${respawn_name}"
+respawn_events="$install_dir/downrespawn-events.jsonl"
+paused_runsv_pid=
 
 log() {
 	printf '[runit-itest] %s\n' "$*"
@@ -160,6 +165,17 @@ collect_artifacts() {
 }
 
 cleanup_service() {
+	if [[ -n "$paused_runsv_pid" ]]; then
+		kill -CONT "$paused_runsv_pid" 2>/dev/null || true
+		paused_runsv_pid=
+	fi
+	if [[ -e "$respawn_dir" || -L "$respawn_enabled" ]]; then
+		"$daemon_bin" remove "$respawn_name" >/dev/null 2>&1 || {
+			sv force-shutdown "$respawn_dir" >/dev/null 2>&1 || true
+			rm -f "$respawn_enabled"
+			rm -rf "$respawn_dir"
+		}
+	fi
 	if [[ -e "$service_dir" || -L "$enabled_path" ]]; then
 		"$daemon_bin" remove "$service_name" >/dev/null 2>&1 || {
 			sv force-shutdown "$service_dir" >/dev/null 2>&1 || true
@@ -247,6 +263,98 @@ verify_management_commands() {
 	assert_contains "$(sv status "$enabled_path")" 'run:' 'native runit status'
 }
 
+verify_stop_during_respawn() {
+	local native_sv supervisor_pid= process status count deadline shim_dir="$state_dir/sv-gate"
+	local auxiliary_port=$((port == 65535 ? 65534 : port + 1))
+	native_sv=$(command -v sv)
+	rm -f "$respawn_events"
+	"$daemon_bin" install --ignore-warnings --stop-timeout 5s "$respawn_name" "$app_bin" \
+		--port "$auxiliary_port" --stop-after 200ms --event-path "$respawn_events"
+	for process in /proc/[0-9]*; do
+		if [[ "$(readlink "$process/cwd" 2>/dev/null || true)" == "$respawn_dir" &&
+			"$(cat "$process/comm" 2>/dev/null || true)" == runsv ]]; then
+			supervisor_pid=${process##*/}
+			break
+		fi
+	done
+	[[ -n "$supervisor_pid" ]] || fail 'could not locate auxiliary runsv supervisor'
+	sv up "$respawn_enabled"
+	deadline=$((SECONDS + 30))
+	while (( SECONDS < deadline )); do
+		status=$(sv status "$respawn_enabled")
+		if [[ "$status" == down:* && "$status" == *'want up'* ]] &&
+			grep -Fq '"event":"failure"' "$respawn_events" 2>/dev/null; then
+			paused_runsv_pid=$supervisor_pid
+			kill -STOP "$supervisor_pid"
+			status=$(sv status "$respawn_enabled")
+			if [[ "$status" == down:* && "$status" == *'want up'* ]]; then
+				break
+			fi
+			kill -CONT "$supervisor_pid"
+			paused_runsv_pid=
+		fi
+		sleep 0.05
+	done
+	[[ -n "$paused_runsv_pid" ]] || fail 'did not observe a real down/want-up respawn interval'
+	printf '%s\n' "$status" >"$artifact_dir/downrespawn-before-stop.txt"
+
+	# Freeze the real supervisor only to hold the short respawn window open.
+	# All status/control calls still reach native sv; resume on force-stop so
+	# the old early-return bug cannot accidentally pass after a timing race.
+	mkdir -p "$shim_dir"
+	cat >"$shim_dir/sv" <<'EOF'
+#!/bin/sh
+for argument do
+	if [ "$argument" = force-stop ]; then
+		kill -CONT "$DAEMON_ITEST_RUNSV_PID" || exit 1
+	fi
+done
+exec "$DAEMON_ITEST_NATIVE_SV" "$@"
+EOF
+	chmod 0755 "$shim_dir/sv"
+	PATH="$shim_dir:$PATH" DAEMON_ITEST_NATIVE_SV="$native_sv" DAEMON_ITEST_RUNSV_PID="$supervisor_pid" \
+		"$daemon_bin" stop "$respawn_name"
+	kill -CONT "$supervisor_pid" 2>/dev/null || true
+	paused_runsv_pid=
+	count=$(event_count "$respawn_events" started)
+	# Native sv may observe an already-down process before runsv consumes the
+	# queued stop byte. Wait for acknowledgment, but never allow another start.
+	deadline=$((SECONDS + 5))
+	while :; do
+		status=$(sv status "$respawn_enabled")
+		[[ "$(event_count "$respawn_events" started)" == "$count" ]] || fail 'application restarted after stop'
+		[[ "$status" == down:* && "$status" != *'want up'* ]] && break
+		(( SECONDS < deadline )) || fail 'supervisor did not acknowledge the stop command'
+		sleep 0.05
+	done
+	for _ in {1..15}; do
+		status=$(sv status "$respawn_enabled")
+		[[ "$status" == down:* && "$status" != *'want up'* ]] || fail 'stopped service still wants to respawn'
+		[[ "$(event_count "$respawn_events" started)" == "$count" ]] || fail 'application restarted after stop'
+		sleep 0.2
+	done
+	[[ ! -e "$respawn_dir/down" && -L "$respawn_enabled" ]] || fail 'stop changed boot enablement'
+	printf '%s\n' "$count" >"$state_dir/downrespawn-starts"
+	printf '%s\n' 'PASS: stop cancelled a real pending respawn without disabling boot' >"$artifact_dir/downrespawn-stop-result.txt"
+}
+
+verify_stopped_service_boot_start() {
+	local before count deadline=$((SECONDS + 30))
+	before=$(cat "$state_dir/downrespawn-starts")
+	while (( SECONDS < deadline )); do
+		count=$(event_count "$respawn_events" started)
+		if (( count > before )); then
+			"$daemon_bin" stop "$respawn_name"
+			"$daemon_bin" remove "$respawn_name"
+			interpreted_removed "$respawn_name"
+			printf '%s\n' 'PASS: manually stopped service autostarted after reboot' >"$artifact_dir/downrespawn-reboot-result.txt"
+			return
+		fi
+		sleep 0.2
+	done
+	fail 'manually stopped service did not autostart after reboot'
+}
+
 pre_reboot() {
 	local events="$install_dir/boot-events.jsonl" child_pid
 	current_scenario=pre-reboot
@@ -260,6 +368,9 @@ pre_reboot() {
 	child_pid=$(cat "$install_dir/child.pid")
 	process_is_test_app "$child_pid" || fail "child process $child_pid is not running"
 	http_pid >"$state_dir/pre-reboot-parent.pid"
+	current_scenario=stop-during-respawn
+	log 'verifying stop during the native down/want-up respawn interval'
+	verify_stop_during_respawn
 	collect_artifacts pre-reboot
 	log 'pre-reboot checks passed'
 }
@@ -279,6 +390,7 @@ post_reboot() {
 	wait_for_http true >"$state_dir/post-reboot-http.json"
 	(( $(event_count "$boot_events" started) >= 2 )) || fail 'service did not start after reboot'
 	verify_management_commands
+	verify_stopped_service_boot_start
 
 	current_scenario=explicit-restart
 	restart_parent=$(http_pid)

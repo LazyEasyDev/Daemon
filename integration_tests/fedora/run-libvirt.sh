@@ -16,6 +16,9 @@ export DISTRO_IMAGE_URL=${DISTRO_IMAGE_URL:-https://download.fedoraproject.org/p
 export DISTRO_IMAGE_SHA256=${DISTRO_IMAGE_SHA256:-55c60a3b80d3616a08705afd0459e75fe9f03c54aba7a46e4002a41a72fa0d5b}
 export VM_ARCH=${VM_ARCH:-arm64}
 export VM_OS_VARIANT=${VM_OS_VARIANT:-generic}
+# Keep device discovery within Fedora's boot deadlines under software emulation.
+export VM_MEMORY_MIB=${VM_MEMORY_MIB:-3072}
+export VM_VCPUS=${VM_VCPUS:-4}
 export VM_BOOT_TIMEOUT=${VM_BOOT_TIMEOUT:-1200}
 
 exec "$integration_dir/rocky/run-libvirt.sh" "$@"

@@ -93,9 +93,12 @@ else
 	log "KVM is unavailable or disabled; using QEMU software emulation"
 fi
 
-for command in go qemu-img virsh virt-install cloud-localds ssh scp ssh-keygen wget sha512sum; do
+for command in go qemu-img virsh virt-install uuidgen cloud-localds ssh scp ssh-keygen wget sha512sum; do
 	require_command "$command"
 done
+
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
 
 mkdir -p "$cache_dir" "$artifact_dir" "$work_dir"
 chmod 0755 "$cache_dir" "$work_dir"
@@ -191,10 +194,6 @@ ssh_options=(
 	-o LogLevel=ERROR
 )
 
-virsh_command() {
-	virsh --connect "$libvirt_uri" "$@"
-}
-
 ssh_guest() {
 	# Arguments are intentionally serialized by SSH for execution in the guest.
 	# shellcheck disable=SC2029
@@ -275,7 +274,7 @@ wait_for_new_boot() {
 	local next_progress=$SECONDS
 	local candidates candidate current_boot_id
 	while (( SECONDS < deadline )); do
-		candidates=$(lease_addresses "$domain_name")
+		candidates=$(lease_addresses "$domain_uuid")
 		while IFS= read -r candidate; do
 			[[ -n "$candidate" ]] || continue
 			ip_address=$candidate
@@ -308,15 +307,14 @@ cleanup() {
 	local status=$?
 	trap - EXIT
 	copy_guest_artifacts
-	virsh_command dumpxml "$domain_name" >"$artifact_dir/domain.xml" 2>/dev/null || true
-	virsh_command domstats "$domain_name" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command dumpxml "$domain_uuid" >"$artifact_dir/domain.xml" 2>/dev/null || true
+	virsh_command domstats "$domain_uuid" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
 	if [[ "$keep_vm" == 1 ]]; then
 		log "keeping VM $domain_name and work directory $work_dir"
 	else
-		virsh_command destroy "$domain_name" >/dev/null 2>&1 || true
-		virsh_command undefine "$domain_name" --nvram >/dev/null 2>&1 || virsh_command undefine "$domain_name" >/dev/null 2>&1 || true
+		remove_owned_domain "$domain_uuid"
 		rm -rf "$work_dir" || true
 	fi
 	if (( status == 0 )); then
@@ -339,6 +337,7 @@ fi
 virt_install_args=(
 	--connect "$libvirt_uri"
 	--name "$domain_name"
+	--uuid "$domain_uuid"
 	--memory "$vm_memory_mib"
 	--vcpus "$vm_vcpus"
 	--virt-type "$virt_type"
@@ -358,7 +357,7 @@ virt_install_args=(
 
 log "creating Debian fallback domain $domain_name"
 virt-install "${virt_install_args[@]}"
-wait_for_ssh "$domain_name" "$vm_boot_timeout" "Debian fallback guest" 3
+wait_for_ssh "$domain_uuid" "$vm_boot_timeout" "Debian fallback guest" 3
 ssh_guest_retry cloud-init status --wait >/dev/null
 
 log "converting Debian guest to SysV init"

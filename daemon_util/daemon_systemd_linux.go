@@ -6,6 +6,7 @@
 package daemon_util
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +61,18 @@ func systemDStatus(status string) (running, recognized bool) {
 	}
 }
 
+// Journald's stream setup needs room for a newline after the unit name.
+// A 255-byte unit filename is valid on disk but fails this native protocol.
+const maxSystemDUnitNameLength = 254
+
+func validateSystemDInstallName(name string) error {
+	if len(name)+len(".service") > maxSystemDUnitNameLength {
+		return fmt.Errorf("%w: systemd service names must not exceed %d characters", ErrInvalidName,
+			maxSystemDUnitNameLength-len(".service")-len(managedServicePrefix))
+	}
+	return nil
+}
+
 // Install the service
 func (linux *systemDRecord) Install(args ...string) (string, error) {
 	installAction := "Install " + linux.description + ":"
@@ -72,6 +85,9 @@ func (linux *systemDRecord) Install(args ...string) (string, error) {
 
 	if linux.isInstalled() {
 		return installAction + failed, ErrAlreadyInstalled
+	}
+	if err := validateSystemDInstallName(linux.name); err != nil {
+		return installAction + failed, err
 	}
 
 	execPatch, err := resolveExecutablePath(linux.name, linux.executablePath)

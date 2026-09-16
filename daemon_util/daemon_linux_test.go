@@ -515,6 +515,25 @@ func TestSystemDStatus(t *testing.T) {
 	}
 }
 
+func TestSystemDInstallNameBoundary(t *testing.T) {
+	for _, length := range []int{240, 241} {
+		name, err := ManagedServiceName(strings.Repeat("a", length))
+		if err != nil {
+			t.Fatalf("general name limit changed for %d characters: %v", length, err)
+		}
+		err = validateSystemDInstallName(name)
+		if length == 240 && err != nil {
+			t.Fatalf("240-character systemd name rejected: %v", err)
+		}
+		if length == 241 && !errors.Is(err, ErrInvalidName) {
+			t.Fatalf("241-character systemd install error = %v, want ErrInvalidName", err)
+		}
+		if err := validateServiceName(name); err != nil {
+			t.Fatalf("existing service name can no longer be managed: %v", err)
+		}
+	}
+}
+
 func TestSystemDStopsControlGroup(t *testing.T) {
 	if !strings.Contains(defaultSystemDConfig, "KillMode=control-group") {
 		t.Fatal("systemd config must stop the entire service control group")

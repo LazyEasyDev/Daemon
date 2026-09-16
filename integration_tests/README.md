@@ -175,6 +175,17 @@ persistence, explicit restart, configured-failure and hard-crash recovery,
 atomic executable replacement, graceful and forced process-group cleanup, and
 removal.
 
+The runit lane also holds a real `down ... want up` respawn interval open while
+the CLI queries status, then resumes the native supervisor when the CLI sends
+`force-stop`. It asserts that no further application startup occurs before
+reboot, that no persistent `down` marker was created, and that the stopped
+service still autostarts after reboot. The shared systemd lane separately
+exercises a 240-character service name through install, metadata readback,
+start, status/list, stop, and removal, and rejects 241 characters before any
+service files are written. Real VM testing exposed journald's native
+255-byte-unit-name protocol boundary; the general service-name limit and the
+atomic-writer unit-test boundary remain 241 characters.
+
 The tests use cached upstream images, archives, generated Buildroot filesystems,
 and disposable overlays or copies. Cached source artifacts are not modified by
 normal test runs.
@@ -184,6 +195,20 @@ normal test runs.
 Run commands from the repository root. The generic System V constructors are
 retained for diagnostics but are not part of the verified matrix; the Yocto
 lane is the canonical System V regression.
+
+To run the ownership safety check and one app-level lane per relevant backend,
+including the Rocky/Fedora/openSUSE security variants and all three Buildroot
+profiles, use the sequential regression matrix. Cached images and prebuilt
+Buildroot outputs are recommended. macOS and Windows are not included:
+
+```sh
+bash integration_tests/run-regression-matrix.sh
+# Or select lanes:
+bash integration_tests/run-regression-matrix.sh ownership systemd opensuse runit
+```
+
+Each lane keeps its log and artifacts; the matrix writes a `results.tsv` report,
+continues after a failed lane, and returns nonzero if any lane failed.
 
 | Lane | Service backend | Command | Host requirement |
 | --- | --- | --- | --- |
@@ -221,7 +246,7 @@ Install the packages appropriate for the host architecture:
 ```sh
 sudo apt update
 sudo apt install libvirt-daemon-system libvirt-clients virtinst \
-  cloud-image-utils qemu-utils qemu-system-x86 qemu-system-arm \
+  cloud-image-utils qemu-utils qemu-system-x86 qemu-system-arm uuid-runtime \
   qemu-efi-aarch64 genisoimage e2fsprogs util-linux wget openssh-client \
   cpio fakeroot kmod mtools xz-utils python3 dpkg-dev iproute2 \
   build-essential bc bison flex git libssl-dev libelf-dev openssl rsync \
@@ -337,6 +362,9 @@ Fedora defaults to Cloud Base 44 and requires SELinux Enforcing. openSUSE
 defaults to the Tumbleweed minimal ARM64 snapshot dated 2026-08-30, requires
 the AppArmor kernel module, and accepts the image's Btrfs or XFS root
 filesystem. Both default to a 1,200-second boot timeout under emulation.
+Fedora defaults to four vCPUs and 3 GiB RAM; its early device discovery can
+exceed native boot deadlines with fewer resources under TCG. Override these
+with `VM_VCPUS` and `VM_MEMORY_MIB` when appropriate for the host.
 
 Use `DISTRO_IMAGE_FILENAME`, `DISTRO_IMAGE_URL`,
 `DISTRO_IMAGE_SHA256`, and `VM_ARCH` together when substituting another image
@@ -881,7 +909,24 @@ also retain a durable guest result, guest test log, and artifacts extracted
 from the stopped filesystem.
 
 The libvirt domain or direct-QEMU process and disposable work files are removed
-even when a test fails unless `KEEP_VM=1` is set.
+even when a test fails unless `KEEP_VM=1` is set. Libvirt runners first reject
+existing domain names before creating test files and allocate a fresh UUID for
+each test domain (including the experimental System V installer domain).
+Creation, lookup, and cleanup use that UUID, so failed or partial creation
+cannot cause cleanup to stop or unregister a different VM with the same name.
+
+The host-side ownership and openSUSE assertion regressions run with the normal
+Go tests using mocked commands; they do not access libvirt or boot a VM. To
+exercise collision handling against a real libvirt daemon, run the diskless
+definition test (it never boots its two temporary domains):
+
+```sh
+bash integration_tests/libvirt-ownership-test.sh
+```
+
+That test requires the runner prerequisites above and verifies every libvirt
+entry point refuses a name collision without changing the existing domain or
+work directory. It also verifies cleanup of a partially created owned domain.
 
 Most software-emulated runners print periodic boot, DHCP, SSH, or reboot
 progress. These waits are expected to take longer than they do with KVM.

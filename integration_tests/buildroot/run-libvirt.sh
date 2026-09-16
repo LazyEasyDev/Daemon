@@ -31,10 +31,10 @@ require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command '$
 
 collect_boot_diagnostics() {
 	log 'collecting boot diagnostics'
-	virsh_command domstate "$domain_name" >"$artifact_dir/domain-state.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command domstate "$domain_uuid" >"$artifact_dir/domain-state.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
-	timeout 12s virsh --connect "$libvirt_uri" console "$domain_name" --force >"$artifact_dir/console-timeout.txt" 2>&1 || true
+	timeout 12s virsh --connect "$libvirt_uri" console "$domain_uuid" --force >"$artifact_dir/console-timeout.txt" 2>&1 || true
 }
 
 host_arch=$(uname -m)
@@ -54,11 +54,14 @@ else
 	log 'KVM is unavailable or disabled; using QEMU software emulation with Cortex-A72 compatibility'
 fi
 
-for command in go virsh virt-install ssh scp ssh-keygen qemu-img debugfs e2fsck; do
+for command in go virsh virt-install uuidgen ssh scp ssh-keygen qemu-img debugfs e2fsck; do
 	require_command "$command"
 done
 [[ -f "$kernel_image" ]] || fail "Buildroot kernel image not found: $kernel_image"
 [[ -f "$rootfs_image" ]] || fail "Buildroot rootfs image not found: $rootfs_image"
+
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
 
 mkdir -p "$work_dir" "$artifact_dir"
 key_path="$work_dir/id_ecdsa"
@@ -121,7 +124,6 @@ cp "$repo_dir/integration_tests/interpreted-app-test.sh" "$build_dir/interpreted
 chmod 0755 "$build_dir/daemon" "$build_dir/test-app" "$build_dir/guest-test.sh" "$build_dir/interpreted-app-test.sh"
 
 ssh_options=(-i "$key_path" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-virsh_command() { virsh --connect "$libvirt_uri" "$@"; }
 ssh_guest() { ssh "${ssh_options[@]}" "root@$ip_address" "$@"; }
 
 copy_artifacts() {
@@ -135,13 +137,12 @@ cleanup() {
 	local status=$?
 	trap - EXIT
 	copy_artifacts
-	virsh_command dumpxml "$domain_name" >"$artifact_dir/domain.xml" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command dumpxml "$domain_uuid" >"$artifact_dir/domain.xml" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	if [[ "$keep_vm" == 1 ]]; then
 		log "keeping VM $domain_name and work directory $work_dir"
 	else
-		virsh_command destroy "$domain_name" >/dev/null 2>&1 || true
-		virsh_command undefine "$domain_name" --nvram >/dev/null 2>&1 || virsh_command undefine "$domain_name" >/dev/null 2>&1 || true
+		remove_owned_domain "$domain_uuid"
 		rm -rf "$work_dir"
 	fi
 	log "artifacts: $artifact_dir"
@@ -152,7 +153,7 @@ trap cleanup EXIT
 wait_for_ssh() {
 	local deadline=$((SECONDS + vm_boot_timeout)) next_progress=$SECONDS
 	while (( SECONDS < deadline )); do
-		ip_address=$(virsh_command domifaddr "$domain_name" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
+		ip_address=$(virsh_command domifaddr "$domain_uuid" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
 		if [[ -n "$ip_address" ]] && ssh_guest true >/dev/null 2>&1; then remote_ready=1; return; fi
 		if (( SECONDS >= next_progress )); then log "waiting for Buildroot SSH (${SECONDS}s elapsed)"; next_progress=$((SECONDS + 15)); fi
 		sleep 2
@@ -174,7 +175,7 @@ virsh_command net-info "$vm_network" >/dev/null || fail "libvirt network '$vm_ne
 if [[ "$(virsh_command net-info "$vm_network" | awk '/^Active:/ {print $2}')" != yes ]]; then virsh_command net-start "$vm_network" >/dev/null; fi
 
 log "creating Buildroot domain $domain_name"
-virt-install --connect "$libvirt_uri" --name "$domain_name" --memory "$vm_memory_mib" --vcpus "$vm_vcpus" \
+virt-install --connect "$libvirt_uri" --name "$domain_name" --uuid "$domain_uuid" --memory "$vm_memory_mib" --vcpus "$vm_vcpus" \
 	--virt-type "$virt_type" --arch aarch64 --machine virt "${cpu_args[@]}" --import \
 	--boot "kernel=$kernel_image,kernel_args=console=ttyAMA0 root=/dev/vda rw" \
 	--disk "path=$vm_rootfs,format=raw,bus=virtio" --network "network=$vm_network,model=virtio" \

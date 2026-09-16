@@ -20,6 +20,7 @@ temporary_app=${DAEMON_ITEST_TEMP_APP:-/tmp/test-app}
 warning_service_name="${service_name}warning"
 warning_unit_path="/etc/systemd/system/lz_lz_${warning_service_name}.service"
 warning_metadata_path="/var/lib/daemon-util/services/lz_lz_${warning_service_name}.json"
+long_service_name=$(printf 'n%0239d' 0)
 
 log() {
 	printf '[systemd-itest] %s\n' "$*"
@@ -227,6 +228,11 @@ collect_artifacts() {
 	systemctl show "$unit_name" --no-pager >"$artifact_dir/${label}-show.txt" 2>&1 || true
 	systemctl cat "$unit_name" --no-pager >"$artifact_dir/${label}-unit.txt" 2>&1 || true
 	journalctl -u "$unit_name" --no-pager >"$artifact_dir/${label}-journal.txt" 2>&1 || true
+	if [[ -f "/etc/systemd/system/lz_lz_${long_service_name}.service" ]]; then
+		systemctl status "lz_lz_${long_service_name}.service" --no-pager -l >"$artifact_dir/${label}-maximum-name-status.txt" 2>&1 || true
+		systemctl cat "lz_lz_${long_service_name}.service" --no-pager >"$artifact_dir/${label}-maximum-name-unit.txt" 2>&1 || true
+		journalctl -u "lz_lz_${long_service_name}.service" --no-pager >"$artifact_dir/${label}-maximum-name-journal.txt" 2>&1 || true
+	fi
 	ps -ef >"$artifact_dir/${label}-processes.txt" 2>&1 || true
 	if [[ "$expect_selinux" == 1 ]]; then
 		{
@@ -247,6 +253,9 @@ collect_artifacts() {
 }
 
 cleanup_service() {
+	if [[ -f "/etc/systemd/system/lz_lz_${long_service_name}.service" ]]; then
+		"$daemon_bin" remove "$long_service_name" >/dev/null 2>&1 || true
+	fi
 	if [[ -f "$unit_path" ]]; then
 		"$daemon_bin" remove "$service_name" >/dev/null 2>&1 || {
 			systemctl disable --now "$unit_name" >/dev/null 2>&1 || true
@@ -355,6 +364,47 @@ wait_for_managed_pid_gone() {
 		fi
 		sleep 0.2
 	done
+}
+
+verify_maximum_service_name() {
+	local long_unit="lz_lz_${long_service_name}.service"
+	local long_unit_path="/etc/systemd/system/$long_unit"
+	local long_metadata="/var/lib/daemon-util/services/lz_lz_${long_service_name}.json"
+	local pid output
+
+	[[ ${#long_service_name} == 240 && ${#long_unit} == 254 ]] || fail 'maximum-name test has the wrong boundary'
+	if output=$("$daemon_bin" install --ignore-warnings "${long_service_name}a" "$app_bin" 2>&1); then
+		fail 'systemd accepted a 255-byte unit name that journald cannot handle'
+	fi
+	assert_contains "$output" 'systemd service names must not exceed 240 characters' 'systemd native name-limit error'
+	[[ ! -e "/etc/systemd/system/lz_lz_${long_service_name}a.service" ]] || fail 'rejected name created a unit'
+	[[ ! -e "/var/lib/daemon-util/services/lz_lz_${long_service_name}a.json" ]] || fail 'rejected name created metadata'
+	printf '%s\n' "$output" >"$artifact_dir/maximum-name-rejection.txt"
+	"$daemon_bin" install --ignore-warnings --stop-timeout 5s "$long_service_name" "$app_bin" \
+		--enabled=true --message 'hello systemd' --count 7 --port "$port" \
+		--file-path relative-path-test.txt
+	[[ -f "$long_unit_path" ]] || fail 'maximum-length unit was not written'
+	assert_file_contains "$long_metadata" "\"application_path\":\"$app_bin\""
+	assert_file_contains "$long_metadata" '"arguments":"--enabled=true --message hello systemd --count 7'
+	assert_file_contains "$long_metadata" '"stop_timeout_seconds":5'
+	[[ "$(systemctl is-enabled "$long_unit")" == enabled ]] || fail 'maximum-length unit is not enabled'
+	"$daemon_bin" start "$long_service_name"
+	wait_for_http false >"$artifact_dir/maximum-name-http.json"
+	pid=$(http_pid)
+	[[ "$(systemctl is-active "$long_unit")" == active ]] || fail 'maximum-length unit is not active'
+	output=$("$daemon_bin" status "$long_service_name")
+	assert_contains "$output" running 'maximum-length service status'
+	output=$("$daemon_bin" list -l)
+	printf '%s\n' "$output" >"$artifact_dir/maximum-name-list.txt"
+	assert_contains "$output" "$long_service_name" 'maximum-length service listing'
+	assert_contains "$output" "$app_bin" 'maximum-length metadata application'
+	assert_contains "$output" 'hello systemd' 'maximum-length metadata arguments'
+	"$daemon_bin" stop "$long_service_name"
+	wait_process_gone "$pid"
+	"$daemon_bin" remove "$long_service_name"
+	[[ ! -e "$long_unit_path" && ! -e "$long_metadata" ]] || fail 'maximum-length service files remain'
+	[[ ! -L "/etc/systemd/system/multi-user.target.wants/$long_unit" ]] || fail 'maximum-length enablement remains'
+	printf '%s\n' 'PASS: 240-character systemd lifecycle and safe rejection at 241' >"$artifact_dir/maximum-name-result.txt"
 }
 
 verify_native_symlink_application() {
@@ -599,6 +649,10 @@ post_reboot() {
 	wait_process_gone "$forced_child"
 	assert_no_test_app_processes
 	"$daemon_bin" remove "$service_name"
+
+	current_scenario=maximum-service-name
+	log 'verifying the systemd service-name and metadata boundary'
+	verify_maximum_service_name
 
 	current_scenario=script-applications
 	log "verifying symlinked, shell, Python, and rejected direct-script applications"

@@ -107,9 +107,12 @@ else
 	log "KVM is unavailable or disabled; using QEMU software emulation"
 fi
 
-for command in go qemu-img virsh virt-install cloud-localds ssh scp ssh-keygen wget sha256sum script; do
+for command in go qemu-img virsh virt-install uuidgen cloud-localds ssh scp ssh-keygen wget sha256sum script; do
 	require_command "$command"
 done
+
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
 
 mkdir -p "$cache_dir" "$artifact_dir" "$work_dir"
 chmod 0755 "$cache_dir" "$work_dir"
@@ -239,10 +242,6 @@ ssh_options=(
 	-o LogLevel=ERROR
 )
 
-virsh_command() {
-	virsh --connect "$libvirt_uri" "$@"
-}
-
 ssh_guest() {
 	# Arguments are intentionally serialized by SSH for execution in the guest.
 	# shellcheck disable=SC2029
@@ -266,9 +265,9 @@ ssh_guest_retry() {
 
 lease_addresses() {
 	local mac
-	mac=$(virsh_command domiflist "$domain_name" 2>/dev/null | awk '$2 == "network" {print $5; exit}' || true)
+	mac=$(virsh_command domiflist "$domain_uuid" 2>/dev/null | awk '$2 == "network" {print $5; exit}' || true)
 	{
-		virsh_command domifaddr "$domain_name" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4}' || true
+		virsh_command domifaddr "$domain_uuid" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4}' || true
 		if [[ -n "$mac" ]]; then
 			virsh_command net-dhcp-leases "$vm_network" --mac "$mac" 2>/dev/null | awk '$5 == "ipv4" {sub(/\/.*/, "", $6); print $6}' || true
 		fi
@@ -337,9 +336,9 @@ cleanup() {
 	local status=$?
 	trap - EXIT
 	copy_guest_artifacts
-	virsh_command dumpxml "$domain_name" >"$artifact_dir/domain.xml" 2>/dev/null || true
-	virsh_command domstats "$domain_name" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command dumpxml "$domain_uuid" >"$artifact_dir/domain.xml" 2>/dev/null || true
+	virsh_command domstats "$domain_uuid" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
 	if [[ -n "$serial_capture_pid" ]]; then
 		kill "$serial_capture_pid" >/dev/null 2>&1 || true
@@ -348,8 +347,7 @@ cleanup() {
 	if [[ "$keep_vm" == 1 ]]; then
 		log "keeping VM $domain_name and work directory $work_dir"
 	else
-		virsh_command destroy "$domain_name" >/dev/null 2>&1 || true
-		virsh_command undefine "$domain_name" --nvram >/dev/null 2>&1 || virsh_command undefine "$domain_name" >/dev/null 2>&1 || true
+		remove_owned_domain "$domain_uuid"
 		rm -rf "$work_dir" || true
 	fi
 	if (( status == 0 )); then
@@ -372,6 +370,7 @@ fi
 virt_install_args=(
 	--connect "$libvirt_uri"
 	--name "$domain_name"
+	--uuid "$domain_uuid"
 	--memory "$vm_memory_mib"
 	--vcpus "$vm_vcpus"
 	--virt-type "$virt_type"
@@ -392,7 +391,7 @@ virt_install_args=(
 
 log "creating $distro_name $distro_version_major libvirt domain $domain_name"
 virt-install "${virt_install_args[@]}"
-script -qefc "virsh --connect '$libvirt_uri' console '$domain_name' --force" "$artifact_dir/serial.log" </dev/null >/dev/null 2>&1 &
+script -qefc "virsh --connect '$libvirt_uri' console '$domain_uuid' --force" "$artifact_dir/serial.log" </dev/null >/dev/null 2>&1 &
 serial_capture_pid=$!
 wait_for_ssh "$vm_boot_timeout" "$distro_name guest"
 

@@ -53,7 +53,7 @@ else
 	log 'KVM is unavailable or disabled; using QEMU software emulation with Cortex-A72 compatibility'
 fi
 
-for command in go qemu-img virsh virt-install cloud-localds ssh scp ssh-keygen wget sha256sum; do
+for command in go qemu-img virsh virt-install uuidgen cloud-localds ssh scp ssh-keygen wget sha256sum; do
 	require_command "$command"
 done
 
@@ -69,6 +69,9 @@ case "$boot_mode" in
 		;;
 	*) fail "unsupported UPSTART_BOOT_MODE '$boot_mode' (expected direct or uefi)" ;;
 esac
+
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
 
 mkdir -p "$cache_dir" "$artifact_dir" "$work_dir"
 chmod 0755 "$cache_dir" "$work_dir"
@@ -160,7 +163,6 @@ cp "$repo_dir/integration_tests/interpreted-app-test.sh" "$build_dir/interpreted
 chmod 0755 "$build_dir/daemon" "$build_dir/test-app" "$build_dir/guest-test.sh" "$build_dir/interpreted-app-test.sh"
 
 ssh_options=(-i "$key_path" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-virsh_command() { virsh --connect "$libvirt_uri" "$@"; }
 ssh_guest() { ssh "${ssh_options[@]}" "$ssh_user@$ip_address" "$@"; }
 
 copy_guest_artifacts() {
@@ -170,25 +172,24 @@ copy_guest_artifacts() {
 }
 
 collect_boot_diagnostics() {
-	virsh_command domstate "$domain_name" >"$artifact_dir/domain-state.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command domstate "$domain_uuid" >"$artifact_dir/domain-state.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
-	timeout 15s virsh --connect "$libvirt_uri" console "$domain_name" --force >"$artifact_dir/console-timeout.txt" 2>&1 || true
+	timeout 15s virsh --connect "$libvirt_uri" console "$domain_uuid" --force >"$artifact_dir/console-timeout.txt" 2>&1 || true
 }
 
 cleanup() {
 	local status_code=$?
 	trap - EXIT
 	copy_guest_artifacts
-	virsh_command dumpxml "$domain_name" >"$artifact_dir/domain.xml" 2>/dev/null || true
-	virsh_command domstats "$domain_name" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command dumpxml "$domain_uuid" >"$artifact_dir/domain.xml" 2>/dev/null || true
+	virsh_command domstats "$domain_uuid" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
 	if [[ "$keep_vm" == 1 ]]; then
 		log "keeping VM $domain_name and work directory $work_dir"
 	else
-		virsh_command destroy "$domain_name" >/dev/null 2>&1 || true
-		virsh_command undefine "$domain_name" --nvram >/dev/null 2>&1 || virsh_command undefine "$domain_name" >/dev/null 2>&1 || true
+		remove_owned_domain "$domain_uuid"
 		rm -rf "$work_dir" || true
 	fi
 	if (( status_code == 0 )); then log "artifacts: $artifact_dir"; else log "test failed; artifacts: $artifact_dir" >&2; fi
@@ -207,7 +208,7 @@ if [[ "$boot_mode" == direct ]]; then
 else
 	boot_args=(--boot "loader=$arm_uefi_code,loader.readonly=yes,loader.type=pflash,nvram.template=$arm_uefi_vars")
 fi
-virt-install --connect "$libvirt_uri" --name "$domain_name" --memory "$vm_memory_mib" --vcpus "$vm_vcpus" \
+virt-install --connect "$libvirt_uri" --name "$domain_name" --uuid "$domain_uuid" --memory "$vm_memory_mib" --vcpus "$vm_vcpus" \
 	--virt-type "$virt_type" --arch aarch64 --machine virt "${cpu_args[@]}" --import \
 	"${boot_args[@]}" \
 	--disk "path=$overlay_image,format=qcow2,bus=virtio" --disk "path=$seed_image,device=cdrom" \
@@ -217,7 +218,7 @@ virt-install --connect "$libvirt_uri" --name "$domain_name" --memory "$vm_memory
 wait_for_ip() {
 	local deadline=$((SECONDS + vm_boot_timeout)) next_progress=$SECONDS
 	while (( SECONDS < deadline )); do
-		ip_address=$(virsh_command domifaddr "$domain_name" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
+		ip_address=$(virsh_command domifaddr "$domain_uuid" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
 		[[ -n "$ip_address" ]] && return
 		if (( SECONDS >= next_progress )); then log "waiting for Trusty DHCP address (${SECONDS}s elapsed)"; next_progress=$((SECONDS + 15)); fi
 		sleep 2

@@ -93,9 +93,12 @@ else
 	log "KVM is unavailable or disabled; using QEMU software emulation"
 fi
 
-for command in go qemu-img virsh virt-install cloud-localds ssh scp ssh-keygen wget sha256sum; do
+for command in go qemu-img virsh virt-install uuidgen cloud-localds ssh scp ssh-keygen wget sha256sum; do
 	require_command "$command"
 done
+
+. "$repo_dir/integration_tests/libvirt-domain.sh"
+domain_uuid=$(new_domain_uuid "$domain_name")
 
 mkdir -p "$cache_dir" "$artifact_dir" "$work_dir"
 chmod 0755 "$cache_dir" "$work_dir"
@@ -191,10 +194,6 @@ ssh_options=(
 	-o LogLevel=ERROR
 )
 
-virsh_command() {
-	virsh --connect "$libvirt_uri" "$@"
-}
-
 ssh_guest() {
 	# Arguments are intentionally serialized by SSH for execution in the guest.
 	# shellcheck disable=SC2029
@@ -215,15 +214,14 @@ cleanup() {
 	local status=$?
 	trap - EXIT
 	copy_guest_artifacts
-	virsh_command dumpxml "$domain_name" >"$artifact_dir/domain.xml" 2>/dev/null || true
-	virsh_command domstats "$domain_name" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
-	virsh_command domifaddr "$domain_name" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
+	virsh_command dumpxml "$domain_uuid" >"$artifact_dir/domain.xml" 2>/dev/null || true
+	virsh_command domstats "$domain_uuid" >"$artifact_dir/domain-stats.txt" 2>/dev/null || true
+	virsh_command domifaddr "$domain_uuid" --source lease >"$artifact_dir/domain-addresses.txt" 2>/dev/null || true
 	virsh_command net-dhcp-leases "$vm_network" >"$artifact_dir/network-leases.txt" 2>/dev/null || true
 	if [[ "$keep_vm" == 1 ]]; then
 		log "keeping VM $domain_name and work directory $work_dir"
 	else
-		virsh_command destroy "$domain_name" >/dev/null 2>&1 || true
-		virsh_command undefine "$domain_name" --nvram >/dev/null 2>&1 || virsh_command undefine "$domain_name" >/dev/null 2>&1 || true
+		remove_owned_domain "$domain_uuid"
 		rm -rf "$work_dir" || true
 	fi
 	if (( status == 0 )); then
@@ -246,6 +244,7 @@ fi
 virt_install_args=(
 	--connect "$libvirt_uri"
 	--name "$domain_name"
+	--uuid "$domain_uuid"
 	--memory "$vm_memory_mib"
 	--vcpus "$vm_vcpus"
 	--virt-type "$virt_type"
@@ -271,9 +270,9 @@ wait_for_ip() {
 	local started=$SECONDS
 	local next_progress=$SECONDS
 	while (( SECONDS < deadline )); do
-		ip_address=$(virsh_command domifaddr "$domain_name" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
+		ip_address=$(virsh_command domifaddr "$domain_uuid" --source lease 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
 		if [[ -z "$ip_address" ]]; then
-			ip_address=$(virsh_command domifaddr "$domain_name" --source agent 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
+			ip_address=$(virsh_command domifaddr "$domain_uuid" --source agent 2>/dev/null | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); print $4; exit}' || true)
 		fi
 		if [[ -n "$ip_address" ]]; then
 			return
