@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,6 +72,33 @@ func TestServiceMetadataOverwrite(t *testing.T) {
 	}
 	if got, ok := readServiceStopTimeoutFrom(directory, "worker"); !ok || got != time.Minute {
 		t.Fatalf("stop timeout = %v, %v; want 1m0s, true", got, ok)
+	}
+}
+
+func TestServiceMetadataMaximumLengthName(t *testing.T) {
+	directory := t.TempDir()
+	serviceName := strings.Repeat("a", 241)
+	want := serviceMetadata{Arguments: "--message hello world", StopTimeoutSeconds: 45}
+
+	for _, applicationPath := range []string{"/opt/worker-v1", "/opt/worker-v2"} {
+		want.ApplicationPath = applicationPath
+		if err := writeServiceMetadataTo(directory, serviceName, applicationPath, want.Arguments, 45*time.Second); err != nil {
+			t.Fatalf("write metadata for maximum-length service name: %v", err)
+		}
+		if got := readServiceMetadataRecordFrom(directory, serviceName); got != want {
+			t.Fatalf("metadata = %+v, want %+v", got, want)
+		}
+	}
+
+	if err := removeServiceMetadataFrom(directory, serviceName); err != nil {
+		t.Fatalf("remove metadata for maximum-length service name: %v", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("directory entries = %v, want no metadata or temporary files", entries)
 	}
 }
 

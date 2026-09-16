@@ -249,7 +249,7 @@ func writeTemplateFile(path, name, source string, funcs template.FuncMap, data a
 		return err
 	}
 
-	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".daemon-util-*")
 	if err != nil {
 		return err
 	}

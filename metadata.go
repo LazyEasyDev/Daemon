@@ -76,7 +76,7 @@ func writeServiceMetadataTo(directory, serviceName, applicationPath, arguments s
 	}
 	content = append(content, '\n')
 
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+"-*")
+	temporary, err := os.CreateTemp(directory, ".daemon-util-metadata-*")
 	if err != nil {
 		return err
 	}

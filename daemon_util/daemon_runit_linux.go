@@ -113,7 +113,9 @@ func (state runitServiceState) startable() bool {
 }
 
 func (state runitServiceState) stoppable() bool {
-	return state == runitServiceRun || state == runitServiceFinish
+	// A down service may still be awaiting respawn. Send the stop command to
+	// cancel further restarts without changing boot enablement.
+	return state == runitServiceDown || state == runitServiceRun || state == runitServiceFinish
 }
 
 func (linux *runitRecord) checkStatus() (string, runitServiceState, error) {

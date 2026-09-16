@@ -312,6 +312,32 @@ func TestRunitStatus(t *testing.T) {
 	}
 }
 
+func TestRunitStopEligibility(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        string
+		exitCode      int
+		wantStoppable bool
+	}{
+		{name: "waiting to respawn", status: "down: /var/service/worker: 0s, normally up, want up", wantStoppable: true},
+		{name: "down but enabled", status: "down: /var/service/worker: 3s, normally up", wantStoppable: true},
+		{name: "normally down", status: "down: /var/service/worker: 3s", wantStoppable: true},
+		{name: "running", status: "run: /var/service/worker: (pid 42) 5s", wantStoppable: true},
+		{name: "finishing", status: "finish: /var/service/worker: (pid 43) 1s", wantStoppable: true},
+		{name: "unknown status", status: "fail: /var/service/worker: unable to open supervise/ok"},
+		{name: "query failure", status: "down: /var/service/worker: 0s, normally up, want up", exitCode: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, _ := runitStatus(test.status, test.exitCode)
+			if got := state.stoppable(); got != test.wantStoppable {
+				t.Fatalf("runitStatus(%q, %d).stoppable() = %v, want %v", test.status, test.exitCode, got, test.wantStoppable)
+			}
+		})
+	}
+}
+
 func TestRunitUnsupervised(t *testing.T) {
 	for _, status := range []string{
 		"fail: /etc/sv/worker: unable to open supervise/ok: file does not exist",
