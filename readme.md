@@ -4,6 +4,11 @@ Install an ordinary executable as a native service on Linux, macOS, FreeBSD,
 or Windows. Each application is registered as an independent service and is
 managed with the operating system's service manager.
 
+## Cloud termination hooks
+
+For AWS Auto Scaling and Azure VM Scale Set termination handling on Linux or
+Windows, see the [cloud hook setup and deployment guide](./cloud_hook/README.md).
+
 ## Quick start
 
 ### 1. Build daemon-util
