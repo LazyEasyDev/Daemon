@@ -14,6 +14,7 @@ type rotatingLogFiles struct {
 	files   [2]*os.File
 	current int
 	maxSize int64
+	closed  bool
 }
 
 func openRotatingLogFiles(executablePath string, maxSize int64) (*rotatingLogFiles, error) {
@@ -56,6 +57,9 @@ func (writer *rotatingLogFiles) Write(data []byte) (n int, err error) {
 			_, _ = os.Stderr.Write(data)
 		}
 	}()
+	if writer.closed {
+		return 0, os.ErrClosed
+	}
 	if int64(len(data)) > writer.maxSize {
 		return 0, fmt.Errorf("log entry exceeds the %d-byte file limit", writer.maxSize)
 	}
@@ -78,6 +82,7 @@ func (writer *rotatingLogFiles) Write(data []byte) (n int, err error) {
 }
 
 func (writer *rotatingLogFiles) Close() error {
+	writer.closed = true
 	var err error
 	for _, file := range writer.files {
 		if file != nil {
